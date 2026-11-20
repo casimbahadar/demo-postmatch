@@ -251,10 +251,29 @@ async function readGold(img, box, lineH, ocr) {
   const dot = g.findIndex(c => c.kind === 'dot');
   if (dot < 1 || g.length - dot < 3) return { ok: false, raw: '', debug: f };
   const whole = g.slice(0, dot).filter(c => c.kind !== 'dot');
-  const frac = g.slice(dot + 1, g.length - 1).filter(c => c.kind !== 'dot'); // last glyph is the "k"
+  // gold always has one digit after the point, then the "k"
+  const frac = [g[dot + 1]];
   const a = await readRun(f, whole, ocr), b = await readRun(f, frac, ocr);
   const raw = a.text + '.' + b.text + 'k';
-  return { ok: /^\d{1,3}\.\dk$/.test(raw), raw, conf: Math.min(a.conf, b.conf), debug: f, stats: f.glyphs.map(c => [c.kind, +(c.w / c.h).toFixed(2), +c.fill.toFixed(2), +c.lean.toFixed(2), +(c.h / f.LH).toFixed(2)]) };
+  const out = { ok: /^\d{1,3}\.\dk$/.test(raw), raw, conf: Math.min(a.conf, b.conf), debug: f };
+  // Anything after the "k" is the next field, joined on by bright game art behind the row.
+  // Keep the run of digit-sized glyphs at the very end: that is the minion count.
+  const rest = g.slice(dot + 3).filter(c => c.kind !== 'dot');
+  if (rest.length) {
+    const tail = [];
+    for (let i = rest.length - 1; i >= 0; i--) {
+      const c = rest[i], next = tail[0];
+      const digitSized = c.h >= f.LH * 0.75 && c.h <= f.LH * 1.25 && c.w <= f.LH;
+      if (!digitSized || (next && next.x0 - c.x1 > f.LH * T.digitGap)) break;
+      tail.unshift(c);
+    }
+    if (tail.length) {
+      const t = await readRun(f, tail, ocr);
+      // recovered from a joined field: always ask the player to check it
+      out.trailing = { type: 'minions', ok: /^\d{1,4}$/.test(t.text), raw: t.text, conf: Math.min(t.conf, 79) };
+    }
+  }
+  return out;
 }
 
 // Minion kills: [crosshair] digits
@@ -350,7 +369,7 @@ const bbox = cs => ({ x0: Math.min(...cs.map(c => c.x0)), y0: Math.min(...cs.map
 const isBlue = rgb => rgb[2] > rgb[0];
 
 async function readHeader(img, mask, panel, ocr) {
-  const W = img.width, PH = panel.PH;
+  const W = img.width, PH = panel.U;   // size unit, see sizeUnit()
   const yEnd = Math.min(panel.footStart, panel.headerEnd + Math.round(PH * 0.03));
   const cc = components(mask, W, 0, panel.top, W, yEnd);
   const comps = cc.comps.filter(c => c.h <= PH * 0.09 && c.w <= c.h * 3 && c.h >= PH * 0.02);
@@ -425,30 +444,33 @@ async function readHeader(img, mask, panel, ocr) {
 // Rating and chat buttons are thin circles of one fixed size (radius ~0.056 PH).
 // Count circle centres where most of the circumference is lit in the text mask.
 function countRings(mask, W, x0, x1, y0, y1, PH) {
-  const R = PH * 0.0557, N = 48, hits = [];
+  const N = 48, hits = [];
   const ring = [];
   for (let i = 0; i < N; i++) ring.push([Math.cos(i * 2 * Math.PI / N), Math.sin(i * 2 * Math.PI / N)]);
   const lit = (x, y) => x >= x0 && x < x1 && y >= 0 && mask[y * W + x];
+  for (const R of [PH * 0.0557 * 0.92, PH * 0.0557, PH * 0.0557 * 1.08]) {
   for (let cy = Math.round(y0 + R); cy <= y1 - R; cy += 2) {
     for (let cx = Math.round(x0 + R); cx <= x1 - R; cx += 2) {
       let n = 0;
-      for (const [c, sn] of ring) {
+      for (let i = 0; i < N; i++) {
+        const [c, sn] = ring[i];
         let ok = false;
         for (let d = -3; d <= 3 && !ok; d++) ok = lit(Math.round(cx + (R + d) * c), Math.round(cy + (R + d) * sn));
         if (ok) n++;
-        else if (n + (N - ring.indexOf(ring.find(q => q[0] === c && q[1] === sn))) < N * 0.8) break;
+        else if (n + (N - 1 - i) < N * 0.8) break;   // can no longer reach 80%: stop early
       }
       if (n >= N * 0.8) hits.push([cx, cy, n]);
     }
   }
+  }
   hits.sort((a, b) => b[2] - a[2]);
   const kept = [];
-  for (const h of hits) if (!kept.some(k => Math.hypot(k[0] - h[0], k[1] - h[1]) < R * 1.5)) kept.push(h);
+  for (const h of hits) if (!kept.some(k => Math.hypot(k[0] - h[0], k[1] - h[1]) < PH * 0.0557 * 1.5)) kept.push(h);
   return kept.length;
 }
 
 function findRows(img, mask, panel, side, cx) {
-  const W = img.width, PH = panel.PH;
+  const W = img.width, PH = panel.U;   // size unit, see sizeUnit()
   const x0 = side === 'left' ? 0 : Math.round(cx + PH * T.centreGap);
   const x1 = side === 'left' ? Math.round(cx - PH * T.centreGap) : W;
   const cc = components(mask, W, x0, panel.headerEnd - Math.round(PH * 0.01), x1, panel.footStart);
@@ -566,8 +588,13 @@ export async function readScreenshot(img, ocr, opts = {}) {
   const mx = maxChannel(img.data, W, H);
   const panel = findPanel(mx, W, H);
   if (!panel) { out.reason = 'no-panel'; return out; }
+  // Text, portraits and buttons scale with the screen's height, not the panel's:
+  // a 5v5 panel is about half again as tall as a 3v3 one with the same text size.
+  // Every size threshold was tuned on 3v3 panels (about 0.64 of the screen height),
+  // so the unit is the panel height, capped at what a 3v3 panel would be.
+  panel.U = Math.min(panel.PH, Math.round(H * 0.66));
   out.panel = panel;
-  const radius = Math.max(4, Math.round(panel.PH * T.blurRadius));
+  const radius = Math.max(4, Math.round(panel.U * T.blurRadius));
   const mask = contrastMask(mx, W, H, panel.top, panel.bottom, radius);
 
   const header = await readHeader(img, mask, panel, ocr);
@@ -600,6 +627,8 @@ export async function readScreenshot(img, ocr, opts = {}) {
         const e = await readExtra(img, box, r.lineH, ocr);
         delete e.debug;
         if (e.type && !row[e.type]) row[e.type] = e;
+        if (e.trailing && !row.minions) row.minions = e.trailing;
+        delete e.trailing;
       }
       row.name = r.nameBox && opts.readNames !== false ? await readName(img, r.nameBox, r.lineH, ocr) : null;
       out.rows.push(row);

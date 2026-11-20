@@ -60,7 +60,7 @@ async function ocr(run, single, text) {
 function cropRow(canvas, res, row) {
   const lh = row.lineH;
   const W = canvas.width;
-  const portraitEdge = res.panel.PH * 0.21;
+  const portraitEdge = res.panel.U * 0.21;
   let x0, x1;
   if (row.side === 'left') {
     x0 = (row.nameBox ? row.nameBox.x0 : row.box.x0 - lh * 8) - lh * 0.5;

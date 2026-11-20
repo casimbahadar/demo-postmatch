@@ -1,7 +1,7 @@
 // sw.js: makes Postmatch work offline after the first visit, and receives
 // screenshots shared from Android's share sheet. It never contacts any other site.
 // Bump VERSION whenever any file changes, so phones fetch the new set.
-const VERSION = 'postmatch-v1';
+const VERSION = 'postmatch-v2';
 const SHARE_CACHE = 'postmatch-share';
 const SHELL = [
   './', 'index.html', 'guide.html', 'styles.css', 'manifest.webmanifest',
